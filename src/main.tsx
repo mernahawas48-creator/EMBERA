@@ -6,7 +6,8 @@ import { Bars, Calendar, Rings } from './Charts'
 import DailyCalendar from './DailyCalendar'
 
 const links = [['observatory', 'Observatory'], ['atlas', 'Fire Atlas'], ['record', 'Fire Record'], ['insights', 'Insights'], ['data', 'Data'], ['methodology', 'Methodology']]
-const firstRange = { start: '2000-11-01', end: new Date().toISOString().slice(0, 10) }
+// Only actual imported coverage is selected after /api/coverage responds.
+const firstRange = { start: '2020-01-01', end: '2025-12-31' }
 const emptyPoints: Hotspots = { points: [], next_after: null }
 const raw = (row: Month | undefined, sensor: string) => {
   if (!row) return null
@@ -22,7 +23,7 @@ export default function App() {
   const [dates, setDates] = useState(firstRange)
   const customDates = useRef<typeof firstRange | null>(null)
   const [coverage, setCoverage] = useState<Coverage | null>(null)
-  const [processing, setProcessing] = useState<{ uploaded?: boolean; processed?: number; expected?: number; failed?: string[] } | null>(null)
+  const [processing, setProcessing] = useState<{ uploaded?: boolean; processed?: number; expected?: number; crc_matched?: number; checkpoint_verified?: boolean; reported_input_rows?: number; failed?: string[] } | null>(null)
   const [filters, setFilters] = useState<Filters | null>(null)
   const [analysis, setAnalysis] = useState<Analysis | null>(null)
   const [hotspots, setHotspots] = useState<Hotspots>(emptyPoints)
@@ -46,7 +47,7 @@ export default function App() {
   useEffect(() => {
     const request = new AbortController()
     api<Region[]>('/regions', request.signal).then(setRegions).catch(() => {})
-    api<{ uploaded?: boolean; processed?: number; failed?: string[] }>('/processing', request.signal)
+    api<{ uploaded?: boolean; processed?: number; expected?: number; crc_matched?: number; checkpoint_verified?: boolean; reported_input_rows?: number; failed?: string[] }>('/processing', request.signal)
       .then(setProcessing).catch(() => {})
     return () => request.abort()
   }, [retry])
@@ -180,7 +181,7 @@ export default function App() {
           <div className="hero-copy">
             <div className="eyebrow"><span className="signal" /> EARTH OBSERVATION / FIRE HISTORY</div>
             <h1>The Fire<br />Memory <em>Atlas.</em></h1>
-            <p>Explore how fire moves through seasons, landscapes, and decades of satellite observations.</p>
+            <p>Explore seasonal thermal detections in the years actually available from the uploaded satellite archive.</p>
             <div className="hero-actions"><a href="#atlas" className="primary"><Compass size={17} /> Explore the atlas <ArrowRight size={17} /></a><a href="#methodology" className="text-action">Our methodology <ArrowUpRight size={15} /></a></div>
           </div>
           <div className="hero-visual">
@@ -210,16 +211,16 @@ export default function App() {
           {formError && <p className="status" role="alert">{formError}</p>}
           {error && <div className="status" role="alert">{error} <button className="small-button" onClick={reload}>Retry</button></div>}
           {!error && !loading && !coverage?.start && <div className="status">No observations have been imported for this selection.</div>}
-          {!error && !loading && coverage?.start && !compare && <p className="status">{region === 'world' ? 'Select a country to see its harmonized calendar where paired coverage and calibration support it.' : 'The activity index needs sufficient paired days and a validated regional calibration.'}</p>}
+          {!error && !loading && coverage?.start && !compare && <p className="status">No validated paired-day activity for this selection. Raw MODIS and VIIRS counts remain available; missing observations are not zero fire activity.</p>}
           <div className="map-controls">
             <label><Layers3 size={15} /><span className="sr-only">Map satellite</span><select value={platform} onChange={event => { setPlatform(event.target.value); setAfter(0) }}>
-              <option value="">Both sensors</option><option value="aqua">MODIS</option><option value="noaa20">VIIRS</option>
+              <option value="">Both sensors</option><option value="aqua">MODIS (all uploaded platforms)</option><option value="noaa20">VIIRS (all uploaded platforms)</option><option value="paired">Harmonized paired-day index</option>
             </select></label>
             {mapMonth && <button className="small-button" onClick={() => { setMapMonth(''); setAfter(0) }}>{mapMonth} ×</button>}
           </div>
           <AtlasMap regions={regions} selected={chosen} points={hotspots.points} onRegion={chooseRegion} />
           <div className="map-footer"><div className="key"><span><i /> MODIS</span><span><i /> VIIRS</span></div>
-            <div role="status">{mapError || (mapLoading ? 'Loading detections…' : hotspots.points.length ? format(hotspots.points.length) + (hotspots.aggregated ? ' displayed sensor-grid cells' + (hotspots.points.length === 5000 ? ' · highest counts shown' : '') : ' plotted detections') : 'No detections to plot')}</div>
+            <div role="status">{mapError || (mapLoading ? 'Loading detections…' : hotspots.points.length ? format(hotspots.points.length) + (hotspots.aggregated ? ' displayed spatial grid cells' : ' plotted detections') : (hotspots.message || 'No detections to plot'))}</div>
             <div className="pages">{after > 0 && <button className="small-button" onClick={() => setAfter(0)}>First page</button>}{hotspots.next_after !== null && <button className="small-button" onClick={() => setAfter(hotspots.next_after!)}>Next page <ArrowRight size={13} /></button>}</div>
           </div>
         </div>
@@ -236,7 +237,7 @@ export default function App() {
               <div><dt>MONTH</dt><dd>{active || '—'}</dd></div><div><dt>ACTIVITY INDEX</dt><dd>{format(record?.activity)}</dd></div>
               <div><dt>RAW MODIS</dt><dd>{format(raw(record, 'MODIS'))}</dd></div><div><dt>RAW VIIRS</dt><dd>{format(raw(record, 'VIIRS'))}</dd></div>
             </dl>
-            <p className="chart-caption">{loading ? 'Loading calendar…' : record?.partial ? 'Partial month. Activity index withheld.' : record?.platform ? `Index source: ${platforms[record.platform]} · ${record.paired_days ?? '—'} paired days` : 'Activity requires paired observations and validated calibration.'}</p>
+            <p className="chart-caption">{loading ? 'Loading calendar…' : record?.partial ? 'Partial selection month. Activity index withheld.' : record?.platform ? `Paired-day index: ${platforms[record.platform]} · ${record.paired_days ?? '—'} paired days (${format((record.paired_day_fraction ?? 0) * 100)}% of month; not verified swath coverage)` : 'Activity requires 20+ paired-observation days and validated regional calibration.'}</p>
             {filters && record && <DailyCalendar filters={filters} month={record.month} metric={metric}
               onSelect={day => { setMapMonth(day); setAfter(0) }} />}
           </article>
@@ -258,9 +259,9 @@ export default function App() {
       <section id="data" className="frame block">
         <div className="section-heading"><div><p className="eyebrow"><Layers3 size={15} /> DATA EXPLORER</p><h2>Observation archive</h2><p>Compare individual platforms and download the filtered records.</p></div></div>
         <article className="panel">
-          {processing?.uploaded && <p className="chart-caption">Uploaded archive · {processing.processed}{processing.expected ? ' / ' + processing.expected : ''} CSV members processed · {processing.failed?.length ?? 0} failed</p>}
+          {processing?.uploaded && <p className="chart-caption">Uploaded archive · {processing.processed}{processing.expected ? ' / ' + processing.expected : ''} CSV checkpoint members · {processing.crc_matched ?? '—'} CRC matches · {processing.failed?.length ?? 0} flagged errors{processing.reported_input_rows ? ` · ${format(processing.reported_input_rows)} reported input rows` : ''}. These are checkpoint records, not an independent CSV or geospatial integrity audit.</p>}
           <div className="table-wrap"><table><caption>Raw detections across the selected range{demo && ' · Synthetic demo'}</caption>
-            <thead><tr><th>Sensor</th><th>Detections</th><th>Months meeting paired-day coverage</th></tr></thead>
+            <thead><tr><th>Sensor</th><th>Detections</th><th>Months with 20+ paired days</th></tr></thead>
             <tbody>{[['MODIS', 'MODIS (all platforms)'], ['VIIRS', 'VIIRS (all uploaded platforms)']].map(([key, name]) => {
               const counts = (rows ?? []).map(row => row.raw[key]).filter((value): value is number => value != null)
               return <tr key={key}><th scope="row">{name}</th><td>{format(counts.length ? counts.reduce((a, b) => a + b, 0) : null)}</td><td>{(rows ?? []).filter(r => r.complete_platforms.includes(key)).length}</td></tr>
@@ -273,8 +274,8 @@ export default function App() {
         <div className="section-heading"><div><p className="eyebrow"><Satellite size={15} /> METHODOLOGY</p><h2>From detection to record</h2></div></div>
         <div className="methods-grid">
           <article><h3>What satellites see</h3><p>FIRMS reports thermal anomalies observed during satellite overpasses. Clouds, smoke, revisit timing, and sensor resolution affect detection. A hotspot may be one of several observations of the same fire or a different heat source. Counts cannot measure unique fires or area burned.</p></article>
-          <article><h3>How the index works</h3><p>EMBERA counts occupied equal-area cells per UTC day. It uses standard-product vegetation detections from Aqua and NOAA-20, with MODIS confidence ≥30 and nominal or high VIIRS confidence. It averages Aqua occupancy and calibrated NOAA-20 occupancy on paired observation days.</p></article>
-          <article><h3>When comparisons are available</h3><p>Monthly estimates require at least 20 paired detection days within the observed file spans. Calibration needs 12 held-out months across seasons and a stable improvement over uncalibrated comparisons. Detection spans cannot establish satellite exposure or distinguish missing days from zero fire activity.</p></article>
+          <article><h3>How the index works</h3><p>EMBERA counts occupied equal-area cells per UTC day. It uses standard-product vegetation detections from Aqua and NOAA-20, with MODIS confidence ≥30 and nominal or high VIIRS confidence. It averages Aqua occupancy and calibrated NOAA-20 occupancy on paired observation days. Global figures pool the supplied country labels, which can overlap geographically.</p></article>
+          <article><h3>When comparisons are available</h3><p>Monthly matched-day estimates require at least 20 dates with both sensor records. Calibration needs 12 held-out months across seasons and stable improvement over uncalibrated comparisons. These estimates are NOT full-month fire totals: archive detections cannot establish complete satellite exposure or distinguish a missing swath from no fire.</p></article>
         </div>
         <p className="calibration" role="status">Regional overlap · {analysis?.calibration.overlap_months ?? 0} qualifying months · {analysis?.calibration.factor == null ? 'NOAA-20 conversion unavailable' : `NOAA-20 × ${analysis.calibration.factor.toFixed(3)}`}</p>
         {analysis && analysis.calibration.validation.held_out_months > 0 && <p className="chart-caption">

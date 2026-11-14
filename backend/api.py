@@ -76,9 +76,17 @@ def processing():
             files = zip_api.inventory(db)
             indexed = db.execute("SELECT 1 FROM sqlite_master WHERE name='archive_inventory'").fetchone()
             expected = db.execute("SELECT COUNT(*) FROM archive_inventory").fetchone()[0] if indexed else None
-        return {"batches": [], "uploaded": True, "processed": sum("error" not in r for _, _, _, r in files),
-                "expected": expected,
-                "failed": [f"{c}/{y}/{s}: {r['error']}" for c, y, s, r in files if "error" in r]}
+            crc_matched = db.execute(
+                "SELECT COUNT(*) FROM archive_inventory a JOIN members m ON a.path=m.path AND a.crc=m.crc"
+            ).fetchone()[0] if indexed else None
+        failed = [f"{c}/{y}/{s}: {r['error']}" for c, y, s, r in files if "error" in r]
+        return {"batches": [], "uploaded": True, "processed": len(files) - len(failed),
+                "expected": expected, "crc_matched": crc_matched,
+                "checkpoint_verified": (expected is not None and expected == crc_matched == len(files) and not failed),
+                "reported_input_rows": sum(int(r.get("rows", 0)) for _, _, _, r in files),
+                "reported_rejections": sum(int(r.get("rejected", 0)) for _, _, _, r in files),
+                "reported_duplicates": sum(int(r.get("duplicates", 0)) for _, _, _, r in files),
+                "failed": failed}
     records = []
     target = hashlib.sha256(database_url().encode()).hexdigest()
     for path in sorted(Path(os.getenv("EMBERA_RAW_DIR", "data/raw")).glob("*.json")):
@@ -173,10 +181,11 @@ def hotspots(data: Dataset, filters: Window, platform: str | None = None,
              after: Annotated[int, Query(ge=0)] = 0, limit: Annotated[int, Query(ge=1, le=5000)] = 3000):
     engine, demo = data
     if engine is None:
-        sensor = {"aqua": "MODIS", "noaa20": "VIIRS"}.get(platform) if platform else None
+        sensors = {"aqua": "MODIS", "noaa20": "VIIRS", "paired": "HARMONIZED"}
+        if platform and platform not in sensors:
+            raise HTTPException(422, "Unknown archive platform")
         with zip_api.connection() as db:
-            return {"demo": False, "points": zip_api.hotspots(db, *filters, sensor) if not platform or sensor else [],
-                    "next_after": None, "aggregated": True}
+            return {"demo": False, **zip_api.hotspots(db, *filters, sensor=sensors.get(platform), after=after, limit=limit)}
     stmt = observation_query(filters, platform).where(O.id > after).limit(limit + 1)
     stmt = stmt.with_only_columns(O.id, O.latitude, O.longitude, O.utc, O.sensor, O.platform)
     with engine.connect() as connection:
@@ -213,7 +222,7 @@ def export_calendar(data: Dataset, filters: Window):
     result = analysis(data, filters)
     fields = ["month", "activity", "platform", "calibration_p90_relative_error", "partial", "baseline", "baseline_years", "robust_z", "anomaly"]
     if data[0] is None:
-        fields += ["paired_days", "evaluated_activity"]
+        fields += ["paired_days", "paired_day_fraction", "evaluated_activity"]
     sensors = zip_api.SENSORS if data[0] is None else PLATFORMS
     rows = (
         [result["demo"], *(r[f] for f in fields), *(r["raw"].get(p) for p in sensors), "|".join(r["complete_platforms"])]
@@ -255,8 +264,12 @@ def export_equatorial():
 def export_hotspots(data: Dataset, filters: Window, platform: str | None = None):
     engine, demo = data
     if engine is None:
+        sensors = {"aqua": "MODIS", "noaa20": "VIIRS", "paired": "HARMONIZED"}
+        if platform and platform not in sensors:
+            raise HTTPException(422, "Unknown archive platform")
+        # Export the same bounded first page as the map, with the requested sensor.
         with zip_api.connection() as db:
-            records = zip_api.hotspots(db, *filters)
+            records = zip_api.hotspots(db, *filters, sensor=sensors.get(platform), limit=5000)["points"]
         fields = ["latitude", "longitude", "sensor", "utc", "weight"]
         return csv_response(([r[f] for f in fields] for r in records), fields, "embera-displayed-grid")
     stmt = observation_query(filters, platform)

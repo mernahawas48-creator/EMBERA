@@ -2,6 +2,35 @@
 
 An interactive NASA FIRMS archive for mapping thermal detections and exploring seasonal changes in historical fire activity.
 
+## Patch science notes (November 2026)
+
+This code patch does not import or modify observation archives or the existing
+`data/processed/atlas.db`. A local read-only checkpoint report counted 2,551/2,551
+member/inventory CRC matches (2020–2025), with member-report `rows` totaling
+146,485,385, 0 reported rejections, and 56 reported duplicates. These are
+**checkpoint-reported input rows**, not a re-count of observations; CSV ZIP
+members and database aggregates were not independently inspected here.
+
+The archive contains observations but not complete valid-observation swath masks.
+Thus, a pair means **both sensors report observations on a UTC date**; it does
+not imply full spatial/daily global coverage. The harmonized index is a *paired
+observed-day index* and never a verified burned-area estimate or fire forecast.
+Global figures pool country-labeled aggregates and may count overlapping borders
+or territories twice. Month/day coverage fractions express matched days only.
+The harmonized map layer uses occupied grid-cell-days on country/date-matched days and
+requires a validated MODIS Aqua ↔ VIIRS NOAA-20 transfer. Raw map layers are
+unadjusted instrument-level detections (not platform-selective, because cell
+aggregates preserve the sensor but do not preserve the individual platform). CSV map export is the first 5,000 ranked cells (same as
+map's supported bounded grid view), not every raw detection.
+
+### Apply the code-only patch safely
+
+From the project root, verify `git status --short`, back up `data/processed/atlas.db`
+if changing any ingestion process independently, then apply the code-only ZIP
+with its included `apply_patch.py`. The installer checks the original file SHA-256
+before changing anything; it never opens SQLite databases and creates a backup
+of every file it modifies. Run project tests and the Next build before pushing.
+
 ## Run with the supplied ZIP
 
 The atlas reads the uploaded country/year archive. The ZIP remains the raw store and
@@ -15,9 +44,10 @@ Use a separate processed directory if replacing the supplied collection.
 .\.venv\Scripts\python.exe -m backend.zip_audit
 ```
 
-Country coverage is inferred from file presence and observation dates. The ZIP does
-not contain valid-pixel or cloud masks. Unobserved days are missing, and the global
-view shows archive counts rather than inferring a fixed worldwide calibration.
+Country labels and observation date spans come from member metadata, not political
+boundaries or valid-pixel masks. Unobserved days are missing. The global view
+may expose a pooled, cross-validated index where enough day-pairs exist, but is
+never a physically complete global satellite exposure estimate.
 Raw country totals remove in-file duplicate detections. Global totals can include
 observations repeated across country files. The map shows up to 5,000 weighted
 sensor-grid cells per request. The model uses same-day Aqua and NOAA-20 observations,
@@ -77,7 +107,7 @@ The downloader checkpoints complete files and records the SHA-256 and product
 quality in `data/raw/`. The API exposes the corresponding batch states at
 `/api/processing`. Keep the local import path below for experiments in a separate database.
 
-## Earlier prototype snapshot workflow
+## Legacy optional snapshot workflow (not used for the supplied ZIP)
 
 The [NASA FIRMS Archive](https://firms.modaps.eosdis.nasa.gov/download/) offers MODIS and VIIRS CSVs via Earthdata or email. Request matching spatial extents and periods, preferably standard science-quality products. Retrieve the files and unzip them. Dates are inclusive UTC.
 
@@ -108,7 +138,7 @@ The header-only schema in [data/firms-schema.csv](data/firms-schema.csv) shows c
 
 Set `DATABASE_URL=postgresql+psycopg://user:password@host:5432/dbname` before migrating to use PostgreSQL. Create the empty database first. Production and demo URLs must point to separate databases. Set `ENABLE_DEMO=false` to disable synthetic data endpoints.
 
-## Interpreting the fire record
+## Legacy snapshot-mode interpretation (separate from ZIP calibration)
 
 - **Raw detections** are imported FIRMS thermal anomalies after identity deduplication. Instrument totals can contain overlapping detections and changes in platform availability. Inspect coverage and platform counts before comparing them. They do not represent unique fires, fire intensity, or burned area.
 - **Activity index** sums distinct occupied 0.25° cell-days per platform in each complete UTC month. It suppresses repeated same-platform detections in the same cell and day. The angular grid controls sampling scale. Cell area varies with latitude, so the index is intended for within-window comparisons.

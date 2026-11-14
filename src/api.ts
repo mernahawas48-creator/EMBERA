@@ -2,6 +2,7 @@ export const platforms: Record<string, string> = {
   terra: 'MODIS Terra', aqua: 'MODIS Aqua', snpp: 'VIIRS Suomi NPP',
   noaa20: 'VIIRS NOAA-20', noaa21: 'VIIRS NOAA-21',
   paired: 'MODIS Aqua + VIIRS NOAA-20',
+  modis_all: 'MODIS (all uploaded platforms)', viirs_all: 'VIIRS (all uploaded platforms)',
 }
 export const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 export const number = new Intl.NumberFormat('en', { maximumFractionDigits: 1 })
@@ -19,6 +20,7 @@ export interface Month {
   baseline: number | null
   evaluated_activity?: number | null
   paired_days?: number
+  paired_day_fraction?: number
   baseline_years: number
   robust_z: number | null
   anomaly: boolean | null
@@ -34,7 +36,7 @@ export interface Analysis {
 export interface Point {
   id: number; latitude: number; longitude: number; utc: string; sensor: string; platform: string; weight?: number
 }
-export interface Hotspots { points: Point[]; next_after: number | null; aggregated?: boolean }
+export interface Hotspots { points: Point[]; next_after: number | null; aggregated?: boolean; message?: string }
 export function query(filters: Filters, extras?: Record<string, string>) {
   return new URLSearchParams({ ...filters, ...extras, demo: String(filters.demo) }).toString()
 }

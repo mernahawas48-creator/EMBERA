@@ -69,31 +69,13 @@ def coverage(db, region):
 def counts(db, region):
     _, args = selector(region)
     if region == "world":
-        query = "SELECT day,sensor,SUM(raw),0 FROM daily GROUP BY day,sensor"
+        # Country labels are not disjoint geographic masks; these are pooled
+        # archive totals, not independently verified global satellite coverage.
+        query = "SELECT day,sensor,SUM(raw),SUM(occupied) FROM daily GROUP BY day,sensor"
     else:
         query = "SELECT day,sensor,raw,occupied FROM daily WHERE country=?"
     return {(r[0], r[1]): (int(r[2]), int(r[3])) for r in db.execute(query, args)}
 
-
-def observed_months(db, region):
-    if region == "world":
-        return set()
-    files = inventory(db, region)
-    intervals = {}
-    for country, year, sensor, report in files:
-        if report.get("first") and report.get("last"):
-            intervals[(country, year, sensor)] = (report["first"], report["last"])
-    country = region_key(region)
-    result = set()
-    for year in sorted({year for _, year, _, _ in files}):
-        for m in range(1, 13):
-            initial, final = map(str, edges(year, m))
-            if all(
-                (span := intervals.get((country, year, sensor))) and span[0] <= initial and span[1] >= final
-                for sensor in SENSORS
-            ):
-                result.add(initial[:7])
-    return result
 
 
 def fit_model(pairs):
@@ -123,11 +105,29 @@ def fit_model(pairs):
 
 def model(db, region):
     inputs = counts(db, region)
-    comparable = observed_months(db, region)
+    if region == "world":
+        # Co-observation must be in the SAME country label and UTC day; a
+        # MODIS-only country cannot be paired with a VIIRS-only country.
+        matched_countries = {}
+        for day, modis, viirs in db.execute(
+            "SELECT m.day,SUM(m.occupied),SUM(v.occupied) "
+            "FROM daily m INNER JOIN daily v ON v.country=m.country AND v.day=m.day "
+            "AND v.sensor='VIIRS' WHERE m.sensor='MODIS' GROUP BY m.day"
+        ):
+            matched_countries[day] = (int(modis), int(viirs))
+        # Preserve ALL raw counts for honest reporting, but restrict calibrated
+        # occupancy to country/day pairs. None means no valid pair, not zero.
+        inputs = {key: (raw, matched_countries[key[0]][0 if key[1] == "MODIS" else 1]
+                        if key[0] in matched_countries else None)
+                  for key, (raw, _) in inputs.items()}
+    # File first/last detection dates do NOT certify daily swath coverage.
+    # Pair days with observations from both sensors without imputing zeros on
+    # unobserved days; require >=20 paired days per eligible month below.
     pairs = defaultdict(lambda: [0, 0])
     matched = defaultdict(int)
     for (day, sensor), (_, occupancy) in inputs.items():
-        if sensor == "MODIS" and day[:7] in comparable and (day, "VIIRS") in inputs:
+        if (sensor == "MODIS" and occupancy is not None
+                and (day, "VIIRS") in inputs and inputs[day, "VIIRS"][1] is not None):
             pairs[day[:7]][0] += occupancy
             pairs[day[:7]][1] += inputs[day, "VIIRS"][1]
             matched[day[:7]] += 1
@@ -162,7 +162,9 @@ def analysis(db, region, start, end):
         held_out = (reference + past_factor * secondary) / (2 * matched[month]) if past_factor is not None and not partial else None
         score = round((held_out - baseline) / (1.4826 * mad), 2) if held_out is not None and mad else None
         rows.append(dict(month=month, raw=raw_counts(selected[month]), activity=value, platform="paired" if value is not None else None,
+                         # Means: 20+ days with both sensors observed, NOT complete satellite coverage.
                          complete_platforms=list(SENSORS) if month in pairs else [], partial=partial,
+                         paired_day_fraction=round(matched.get(month, 0) / ((last - first).days + 1), 4),
                          baseline=baseline, baseline_years=len(prior), robust_z=score, evaluated_activity=held_out,
                          paired_days=matched.get(month, 0),
                          anomaly=abs(score) >= 3.5 if score is not None else None,
@@ -181,21 +183,61 @@ def daily(db, region, start, end):
     for n in range((end - start).days + 1):
         day = str(start + timedelta(days=n))
         a, b = [inputs.get((day, sensor)) for sensor in SENSORS]
-        value = round((a[1] + factor * b[1]) / 2, 4) if factor is not None and day[:7] in pairs and a and b else None
+        value = round((a[1] + factor * b[1]) / 2, 4) if factor is not None and day[:7] in pairs and a and b and a[1] is not None and b[1] is not None else None
         result.append(dict(day=day, activity=value, platform="paired" if value is not None else None,
                            raw=raw_counts({"MODIS": a[0] if a else None, "VIIRS": b[0] if b else None}),
                            calibration_p90_relative_error=None))
     return result
 
 
-def hotspots(db, region, start, end, sensor=None):
+def hotspots(db, region, start, end, sensor=None, after=0, limit=3000):
+    """Bounded, date-filtered grid values, never individual fire events.
+
+    `sensor="HARMONIZED"` uses calibrated *occupied* cell-days only on dates
+    where both sensors have observations in the selected region. Missing swaths
+    are not interpreted as zero fire detections.
+    """
+    if sensor not in (None, "MODIS", "VIIRS", "HARMONIZED"):
+        raise HTTPException(422, "Unknown archive sensor")
+    if not 0 <= after or not 1 <= limit <= 5000:
+        raise HTTPException(422, "Invalid grid page")
     where, args = selector(region)
-    clause = " AND sensor=?" if sensor else ""
-    rows = db.execute(
-        "SELECT x,y,sensor,SUM(raw) AS weight FROM cells WHERE " + where +
-        " AND day BETWEEN ? AND ?" + clause + " GROUP BY x,y,sensor ORDER BY weight DESC,x,y,sensor LIMIT 5000",
-        [*args, str(start), str(end), *([sensor] if sensor else [])]
-    )
-    return [dict(id=i, latitude=float(np.rad2deg(np.arcsin((r["y"] + .5) / 57 - 1))),
-                 longitude=r["x"] * 2 - 179, sensor=r["sensor"], platform=SENSORS[r["sensor"]],
-                 utc=str(start) + " to " + str(end), weight=r["weight"]) for i, r in enumerate(rows, 1)]
+    if sensor == "HARMONIZED":
+        _, _, _, calibration = model(db, region)
+        factor = calibration["factor"]
+        if factor is None:
+            return {"points": [], "next_after": None, "aggregated": True,
+                    "message": "No validated sensor conversion for this region and date history"}
+        # The paired-day subquery must use the SAME regional selection.
+        query = (
+            "WITH matched AS (SELECT country,day FROM daily WHERE " + where +
+            " AND day BETWEEN ? AND ? GROUP BY country,day "
+            "HAVING MAX(CASE WHEN sensor='MODIS' THEN 1 ELSE 0 END)=1 "
+            "AND MAX(CASE WHEN sensor='VIIRS' THEN 1 ELSE 0 END)=1) "
+            "SELECT c.x,c.y,"
+            "(SUM(CASE WHEN c.sensor='MODIS' THEN c.occupied ELSE 0 END) + "
+            " ? * SUM(CASE WHEN c.sensor='VIIRS' THEN c.occupied ELSE 0 END))/2.0 AS weight "
+            "FROM cells c INNER JOIN matched m ON c.country=m.country AND c.day=m.day WHERE " +
+            ("1=1" if region == "world" else "c.country=?") +
+            " GROUP BY c.x,c.y HAVING weight>0 ORDER BY weight DESC,c.x,c.y LIMIT ? OFFSET ?"
+        )
+        params = [*args, str(start), str(end), factor, *args, limit + 1, after]
+    else:
+        clause = " AND sensor=?" if sensor else ""
+        query = (
+            "SELECT x,y,sensor,SUM(raw) AS weight FROM cells WHERE " + where +
+            " AND day BETWEEN ? AND ?" + clause +
+            " GROUP BY x,y,sensor ORDER BY weight DESC,x,y,sensor LIMIT ? OFFSET ?"
+        )
+        params = [*args, str(start), str(end), *([sensor] if sensor else []), limit + 1, after]
+    records = db.execute(query, params).fetchall()
+    more = len(records) > limit
+    points = []
+    for i, r in enumerate(records[:limit], after + 1):
+        s = "HARMONIZED" if sensor == "HARMONIZED" else r["sensor"]
+        points.append(dict(id=i, latitude=float(np.rad2deg(np.arcsin((r["y"] + .5) / 57 - 1))),
+                           longitude=r["x"] * 2 - 179, sensor=s,
+                           platform="paired" if s == "HARMONIZED" else ("modis_all" if s == "MODIS" else "viirs_all"),
+                           utc=str(start) + " to " + str(end), weight=float(r["weight"])))
+    return {"points": points, "next_after": after + limit if more else None, "aggregated": True,
+            "message": "Paired-day calibrated occupancy" if sensor == "HARMONIZED" else "Raw detection-count grid"}

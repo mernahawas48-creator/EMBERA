@@ -50,9 +50,9 @@ export function AtlasMap({ regions, selected, points, onRegion }: {
     const layer = L.layerGroup().addTo(atlas)
     points.forEach(point => {
       const label = document.createElement('span')
-      label.textContent = `${platforms[point.platform]} · ${point.utc} · ${point.latitude.toFixed(3)}, ${point.longitude.toFixed(3)}${point.weight == null ? '' : ' · ' + point.weight.toLocaleString() + ' detections in grid cell'}`
+      label.textContent = `${platforms[point.platform]} · ${point.utc} · ${point.latitude.toFixed(3)}, ${point.longitude.toFixed(3)}${point.weight == null ? '' : ' · ' + point.weight.toLocaleString() + (point.sensor === 'HARMONIZED' ? ' calibrated occupied cell-days' : ' detections in grid cell')}`
       L.circleMarker([point.latitude, point.longitude], {
-        radius: point.weight == null ? 2.8 : Math.min(12, 2 + Math.log1p(point.weight) * .8), fillColor: point.sensor === 'MODIS' ? '#ff9c5c' : '#e8ce82',
+        radius: point.weight == null ? 2.8 : Math.min(12, 2 + Math.log1p(point.weight) * .8), fillColor: point.sensor === 'MODIS' ? '#ff9c5c' : point.sensor === 'HARMONIZED' ? '#f67b7b' : '#e8ce82',
         fillOpacity: .78, stroke: false,
       }).bindPopup(label).addTo(layer)
     })
