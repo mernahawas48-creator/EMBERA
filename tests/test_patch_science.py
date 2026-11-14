@@ -74,6 +74,13 @@ def test_world_aggregates_and_validated_grid(tmp_path):
         assert len(raw['points']) == 1
         assert raw['points'][0]['platform'] == 'modis_all'
         assert raw['points'][0]['weight'] == 20
+        # A matching grid coordinate in a different country file is not a
+        # same-country sensor overlap.
+        db.execute('INSERT INTO cells VALUES (?,?,?,?,?,?,?)', ('Other_Country', '2024-01-01', 'VIIRS', 95, 60, 1, 1))
+        db.commit()
+        comparison = zip_api.comparison(db, 'world', date(2024, 1, 1), date(2024, 1, 31))
+        assert comparison['overlapping_cell_days'] == 20
+        assert comparison['sensors']['MODIS']['detections'] == 2020
         with pytest.raises(Exception):
             zip_api.hotspots(db, 'world', date(2024, 1, 1), date(2024, 1, 31), sensor='BOGUS')
     finally:

@@ -16,7 +16,7 @@ from backend.analytics import build_calendar, daily_calendar, in_region, trends
 from backend.db import Coverage, Observation as O, database_url, engine_for
 from backend.regions import PLATFORMS, REGIONS, contains
 from backend import zip_api
-from backend.equatorial import cached as equatorial_report
+from backend import ml_intelligence, recent_pipeline
 
 app = FastAPI(title="EMBERA · The Fire Memory Atlas", version="1.0.0")
 router = APIRouter(prefix="/api")
@@ -67,6 +67,139 @@ def equatorial():
         raise HTTPException(503, "Import the uploaded archive before running equatorial analysis")
     with zip_api.connection() as db:
         return equatorial_report(db)
+
+
+@router.get("/intelligence")
+def intelligence():
+    """Return persisted historical model metrics and audited recent-data status."""
+    artifacts = ml_intelligence.load()
+    recent_path = recent_pipeline.MANIFEST
+    recent = json.loads(recent_path.read_text(encoding="utf-8")) if recent_path.is_file() else None
+    if artifacts is None:
+        model_data, results = None, None
+    else:
+        model_data, results = artifacts
+    # Always provide real CSV-derived historical analytics when the optional
+    # model artifact is absent. The seasonal method is already computed by the
+    # existing archive API, with its own calibration and coverage checks.
+    # Recent NRT raw-coordinate observations are useful for situational
+    # awareness, but not cross-sensor calibrated or assigned ML alerts.
+    recent_points = []
+    recent_summary = {}
+    if recent_path.is_file() and recent_pipeline.DB.is_file():
+        with recent_pipeline.connection() as db:
+            for sensor, count in db.execute("SELECT sensor,COUNT(*) FROM observations GROUP BY sensor"):
+                recent_summary[sensor] = count
+            # Keep map payload bounded; retain a date-filterable set by taking
+            # a deterministic spatially distributed sample across each sensor.
+            for row in db.execute("""SELECT id,sensor,platform,utc,latitude,longitude,frp,confidence,qualified
+                FROM observations WHERE id % 17 = 0 ORDER BY id"""):
+                recent_points.append(dict(row))
+    return {"status": "historical_model_ready_recent_inference_blocked" if model_data else "statistical_baseline_only",
+            "model": model_data, "results": results, "recent": recent, "recent_summary": recent_summary,
+            "recent_points": recent_points,
+            "alerts": [], "case": results.get("case") if results else None}
+
+
+@router.get("/recent-alerts")
+def recent_alerts():
+    """Compare complete supplied NRT dates with positive seasonal grid history.
+
+    Sensor series are evaluated independently. Historical years without a
+    detection are missing, not zero; at least three observed seasonal values
+    are required. The output is a statistical watch signal, not a fire report.
+    """
+    if not recent_pipeline.DB.is_file() or not zip_api.enabled():
+        return {"period": None, "alerts": [], "watch": [], "status": "data_unavailable"}
+    with recent_pipeline.connection() as recent_db:
+        last = recent_db.execute("SELECT MAX(substr(utc,1,10)) FROM observations").fetchone()[0]
+        if not last:
+            return {"period": None, "alerts": [], "watch": [], "status": "data_unavailable"}
+        from datetime import date, timedelta
+        end = date.fromisoformat(last) - timedelta(days=1)  # latest date is incomplete
+        start = end - timedelta(days=6)
+        start_s, end_s = start.isoformat(), end.isoformat()
+        recent_rows = recent_db.execute("""SELECT sensor,x,y,SUM(CASE WHEN qualified>0 THEN 1 ELSE 0 END) activity,
+                SUM(raw) raw_detections,COUNT(DISTINCT day) active_days
+            FROM cells WHERE day BETWEEN ? AND ? GROUP BY sensor,x,y""", (start_s, end_s)).fetchall()
+    recent_by = {(r["sensor"], r["x"], r["y"]): dict(r) for r in recent_rows}
+    if not recent_by:
+        return {"period": [start_s, end_s], "alerts": [], "watch": [], "status": "no_qualified_detections"}
+    cells = {(sensor, x, y) for sensor, x, y in recent_by}
+    xys = {(x, y) for _, x, y in cells}
+    min_x, max_x = min(x for x, _ in xys), max(x for x, _ in xys)
+    min_y, max_y = min(y for _, y in xys), max(y for _, y in xys)
+    last_year = int(start_s[:4]) - 1
+    first_year = max(2020, last_year - 5)
+    seasonal = {}
+    with zip_api.connection() as archive:
+        if xys:
+            for year in range(max(2020, first_year), last_year + 1):
+                a = date(year, start.month, min(start.day, 28))
+                b = date(year, end.month, min(end.day, 28))
+                if b < a:
+                    b = date(year, 12, 31)
+                rs = archive.execute("""SELECT sensor,x,y,COUNT(DISTINCT day) activity,COUNT(DISTINCT day) active_days
+                    FROM cells WHERE day BETWEEN ? AND ? AND x BETWEEN ? AND ? AND y BETWEEN ? AND ?
+                    AND sensor IN ('MODIS','VIIRS') AND occupied=1 GROUP BY sensor,x,y""",
+                    (a.isoformat(), b.isoformat(), min_x, max_x, min_y, max_y)).fetchall()
+                for r in rs:
+                    key = (r["sensor"], r["x"], r["y"])
+                    if key in cells:
+                        seasonal.setdefault(key, []).append((year, int(r["activity"]), int(r["active_days"])))
+    import numpy as np
+    candidates = []
+    for key, current in recent_by.items():
+        history = seasonal.get(key, [])
+        if len(history) < 3:
+            continue
+        values = np.asarray([v for _, v, _ in history], dtype=float)
+        baseline = float(np.median(values))
+        mad = float(np.median(np.abs(values - baseline)))
+        spread = max(1.4826 * mad, 1.0)
+        score = (float(current["activity"]) - baseline) / spread
+        if score >= 2.5 and current["activity"] > baseline:
+            candidates.append({"sensor": key[0], "x": key[1], "y": key[2], "activity": int(current["activity"]),
+                "raw_detections": int(current["raw_detections"]), "active_days": int(current["active_days"]),
+                "baseline": round(baseline, 2), "score": round(score, 2), "history_years": len(history),
+                "history_active_years": [year for year, _, _ in history]})
+    # Merge adjacent anomalous grid cells from the same sensor into display events.
+    groups = []
+    remaining = set(range(len(candidates)))
+    while remaining:
+        stack = [remaining.pop()]
+        group = []
+        while stack:
+            idx = stack.pop(); group.append(candidates[idx])
+            near = [j for j in remaining if candidates[j]["sensor"] == candidates[idx]["sensor"]
+                    and max(abs(candidates[j]["x"] - candidates[idx]["x"]), abs(candidates[j]["y"] - candidates[idx]["y"])) <= 1]
+            for j in near:
+                remaining.remove(j); stack.append(j)
+        groups.append(group)
+    alerts = []
+    watch = []
+    for group in groups:
+        x = float(np.mean([r["x"] for r in group])); y = float(np.mean([r["y"] for r in group]))
+        highest = max(r["score"] for r in group)
+        severity = "HIGH" if highest >= 5 and len(group) >= 3 else "MEDIUM" if highest >= 3.5 else "LOW"
+        recommendation = ("Several nearby grid cells rose well above the seasonal range. Recheck the next satellite pass and share this location with the regional fire or environmental monitoring team for prompt verification."
+                         if severity == "HIGH" else
+                         "This location is above its seasonal range. Check the next satellite pass and verify with a local monitoring source before escalating.")
+        event = {"sensor": group[0]["sensor"], "region": "Northern and Central Africa",
+            "period": [start_s, end_s], "latitude": float(np.rad2deg(np.arcsin((y + .5) / 57 - 1))),
+            "longitude": x * 2 - 179, "cell_count": len(group),
+            "activity": sum(r["activity"] for r in group), "baseline": round(sum(r["baseline"] for r in group), 2),
+            "score": round(highest, 2), "severity": severity,
+            "explanation": f"{group[0]['sensor']} showed more repeated hotspot cell-days than its recent seasonal history in {len(group)} nearby grid cell(s).",
+            "recommendation": recommendation,
+            "uncertainty": "NRT detections can include non-fire sources; historical no-detection years were treated as missing. MODIS and VIIRS are assessed separately; no cross-sensor calibration was applied."}
+        (watch if severity == "LOW" else alerts).append(event)
+    alerts.sort(key=lambda e: (e["score"], e["cell_count"]), reverse=True)
+    watch.sort(key=lambda e: (e["score"], e["cell_count"]), reverse=True)
+    return {"period": [start_s, end_s], "alerts": alerts, "watch": watch,
+            "status": "scored" if alerts else "no_statistically_significant_anomalies",
+            "method": "sensor-specific seasonal grid-cell comparison; historical positive detection years only; minimum 3 years; robust deviation >=2.5",
+            "excluded_recent_partial_day": last}
 
 
 @router.get("/processing")
@@ -184,13 +317,20 @@ def hotspots(data: Dataset, filters: Window, platform: str | None = None,
         sensors = {"aqua": "MODIS", "noaa20": "VIIRS", "paired": "HARMONIZED"}
         if platform and platform not in sensors:
             raise HTTPException(422, "Unknown archive platform")
-        with zip_api.connection() as db:
-            return {"demo": False, **zip_api.hotspots(db, *filters, sensor=sensors.get(platform), after=after, limit=limit)}
+        return {"demo": False, **zip_api.cached_hotspots(*filters, sensor=sensors.get(platform), after=after, limit=limit)}
     stmt = observation_query(filters, platform).where(O.id > after).limit(limit + 1)
     stmt = stmt.with_only_columns(O.id, O.latitude, O.longitude, O.utc, O.sensor, O.platform)
     with engine.connect() as connection:
         rows = [dict(row) for row in connection.execute(stmt).mappings()]
     return {"demo": demo, "points": rows[:limit], "next_after": rows[limit - 1]["id"] if len(rows) > limit else None}
+
+
+@router.get("/comparison")
+def comparison(data: Dataset, filters: Window):
+    if data[0] is not None:
+        raise HTTPException(503, "Uploaded archive required")
+    with zip_api.connection() as db:
+        return zip_api.comparison(db, *filters)
 
 
 def protect_cell(value):

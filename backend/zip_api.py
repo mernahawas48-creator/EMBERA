@@ -4,6 +4,8 @@ import os
 from contextlib import closing
 from collections import defaultdict
 from datetime import timedelta
+from datetime import date
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -160,7 +162,11 @@ def analysis(db, region, start, end):
         baseline = float(np.median(prior)) if len(prior) >= 3 else None
         mad = float(np.median(np.abs(np.asarray(prior) - baseline))) if baseline is not None else 0
         held_out = (reference + past_factor * secondary) / (2 * matched[month]) if past_factor is not None and not partial else None
-        score = round((held_out - baseline) / (1.4826 * mad), 2) if held_out is not None and mad else None
+        # Near-constant baselines can make a tiny difference look like an
+        # extreme anomaly. Require at least one occupied cell-day per paired
+        # day, or 10% of the baseline, as a practical dispersion floor.
+        spread = max(1.4826 * mad, abs(baseline) * .1, 1.0) if baseline is not None else None
+        score = round((held_out - baseline) / spread, 2) if held_out is not None and spread else None
         rows.append(dict(month=month, raw=raw_counts(selected[month]), activity=value, platform="paired" if value is not None else None,
                          # Means: 20+ days with both sensors observed, NOT complete satellite coverage.
                          complete_platforms=list(SENSORS) if month in pairs else [], partial=partial,
@@ -241,3 +247,33 @@ def hotspots(db, region, start, end, sensor=None, after=0, limit=3000):
                            utc=str(start) + " to " + str(end), weight=float(r["weight"])))
     return {"points": points, "next_after": after + limit if more else None, "aggregated": True,
             "message": "Paired-day calibrated occupancy" if sensor == "HARMONIZED" else "Raw detection-count grid"}
+
+
+@lru_cache(maxsize=24)
+def _cached_hotspots(db_path, version, region, start, end, sensor, after, limit):
+    with closing(connect(Path(db_path))) as db:
+        return hotspots(db, region, date.fromisoformat(start), date.fromisoformat(end), sensor, after, limit)
+
+
+def cached_hotspots(region, start, end, sensor=None, after=0, limit=3000):
+    path = Path(os.getenv("EMBERA_ZIP_DB", str(STORE)))
+    stat = path.stat()
+    return _cached_hotspots(str(path.resolve()), (stat.st_mtime_ns, stat.st_size), region,
+                            str(start), str(end), sensor, after, limit)
+
+
+def comparison(db, region, start, end):
+    where, args = selector(region)
+    rows = db.execute(
+        "SELECT sensor,SUM(raw) AS detections,COUNT(DISTINCT day) AS days,COUNT(*) AS cell_days "
+        "FROM cells WHERE " + where + " AND day BETWEEN ? AND ? GROUP BY sensor",
+        [*args, str(start), str(end)],
+    ).fetchall()
+    sensors = {row["sensor"]: dict(detections=row["detections"], observed_days=row["days"], occupied_cell_days=row["cell_days"]) for row in rows}
+    overlap = db.execute(
+        "SELECT COUNT(*) FROM (SELECT country,day,x,y FROM cells WHERE " + where +
+        " AND day BETWEEN ? AND ? GROUP BY country,day,x,y HAVING COUNT(DISTINCT sensor)=2)",
+        [*args, str(start), str(end)],
+    ).fetchone()[0]
+    return {"sensors": sensors, "overlapping_cell_days": overlap,
+            "grid": "2° longitude by equal-area sine-latitude bins", "period": [str(start), str(end)]}

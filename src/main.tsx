@@ -4,6 +4,7 @@ import { api, endpoint, format, monthNames, platforms, query, type Analysis, typ
 import { AtlasMap } from './AtlasMap'
 import { Bars, Calendar, Rings } from './Charts'
 import DailyCalendar from './DailyCalendar'
+import type L from 'leaflet'
 
 const links = [['observatory', 'Observatory'], ['atlas', 'Fire Atlas'], ['record', 'Fire Record'], ['insights', 'Insights'], ['data', 'Data'], ['methodology', 'Methodology']]
 // Only actual imported coverage is selected after /api/coverage responds.
@@ -32,6 +33,10 @@ export default function App() {
   const [mapMonth, setMapMonth] = useState('')
   const [metricChoice, setMetric] = useState('auto')
   const [platform, setPlatform] = useState('')
+  const [comparisonMode, setComparisonMode] = useState(false)
+  const [comparison, setComparison] = useState<{ sensors: Record<string, { detections: number; observed_days: number; occupied_cell_days: number }>; overlapping_cell_days: number } | null>(null)
+  const [comparisonPoints, setComparisonPoints] = useState<{ modis: Hotspots; viirs: Hotspots }>({ modis: emptyPoints, viirs: emptyPoints })
+  const synchronizedMaps = useRef<Set<L.Map>>(new Set())
   const [loading, setLoading] = useState(true)
   const [mapLoading, setMapLoading] = useState(false)
   const [error, setError] = useState('')
@@ -83,7 +88,9 @@ export default function App() {
     setActive('')
     api<Analysis>(`/analysis?${query(filters)}`, request.signal).then(result => {
       setAnalysis(result)
-      setActive([...result.months].reverse().find(row => row.activity != null || Object.values(row.raw).some(value => value != null))?.month ?? '')
+      const latest = [...result.months].reverse().find(row => row.activity != null || Object.values(row.raw).some(value => value != null))?.month ?? ''
+      setActive(latest)
+      setMapMonth(latest)
     }).catch(err => {
       if (!request.signal.aborted) setError(err.message)
     }).finally(() => {
@@ -95,7 +102,7 @@ export default function App() {
   useEffect(() => {
     setHotspots(emptyPoints)
     setMapError('')
-    if (!filters) { setMapLoading(false); return }
+    if (!filters || !analysis || !mapMonth) { setMapLoading(false); return }
     const request = new AbortController()
     let mapFilters = filters
     if (mapMonth.length === 10) {
@@ -110,7 +117,25 @@ export default function App() {
       .then(setHotspots).catch(err => { if (!request.signal.aborted) setMapError(err.message) })
       .finally(() => { if (!request.signal.aborted) setMapLoading(false) })
     return () => request.abort()
-  }, [filters, mapMonth, after, platform])
+  }, [filters, analysis, mapMonth, after, platform])
+
+  useEffect(() => {
+    if (!comparisonMode || !filters || !analysis || !mapMonth) return
+    const controller = new AbortController()
+    const [y, m] = mapMonth.split('-').map(Number)
+    const monthEnd = mapMonth.length === 7 ? `${mapMonth}-${new Date(Date.UTC(y, m, 0)).getUTCDate()}` : mapMonth
+    const selected = { ...filters,
+      start: [filters.start, mapMonth.length === 7 ? `${mapMonth}-01` : mapMonth].sort()[1],
+      end: [filters.end, monthEnd].sort()[0] }
+    const params = query(selected, { limit: '3000' })
+    Promise.all([
+      api<Hotspots>(`/hotspots?${params}&platform=aqua`, controller.signal),
+      api<Hotspots>(`/hotspots?${params}&platform=noaa20`, controller.signal),
+      api<typeof comparison>(`/comparison?${params}`, controller.signal),
+    ]).then(([modis, viirs, stats]) => { setComparisonPoints({ modis, viirs }); setComparison(stats) })
+      .catch(err => { if (!controller.signal.aborted) setMapError(err.message) })
+    return () => controller.abort()
+  }, [comparisonMode, filters, analysis, mapMonth])
 
   const rows = analysis?.months
   const byMonth = useMemo(() => new Map((rows ?? []).map(row => [row.month, row])), [rows])
@@ -171,7 +196,7 @@ export default function App() {
     <header className="masthead">
       <div className="frame masthead-inner">
         <a className="brand" href="#observatory" aria-label="EMBERA observatory"><span className="brand-mark"><Flame size={20} strokeWidth={1.6} /></span> EMBERA</a>
-        <nav aria-label="Main navigation">{links.map(([hash, label]) => <a key={hash} href={'#' + hash} aria-current={section === hash ? 'location' : undefined}>{label}</a>)}<a href="/equatorial">Equatorial Intelligence</a></nav>
+        <nav aria-label="Main navigation">{links.map(([hash, label]) => <a key={hash} href={'#' + hash} aria-current={section === hash ? 'location' : undefined}>{label}</a>)}<a href="/equatorial">Equatorial Intelligence</a><a href="/bioscape" target="_blank" rel="noreferrer">BioSCape Explorer</a></nav>
         <a className="source-link" href="https://firms.modaps.eosdis.nasa.gov/" target="_blank" rel="noreferrer"><Radio size={14} /> NASA FIRMS <ArrowUpRight size={13} /></a>
       </div>
     </header>
@@ -213,14 +238,24 @@ export default function App() {
           {!error && !loading && !coverage?.start && <div className="status">No observations have been imported for this selection.</div>}
           {!error && !loading && coverage?.start && !compare && <p className="status">No validated paired-day activity for this selection. Raw MODIS and VIIRS counts remain available; missing observations are not zero fire activity.</p>}
           <div className="map-controls">
+            <button type="button" className="small-button" aria-pressed={comparisonMode} onClick={() => setComparisonMode(value => !value)}>{comparisonMode ? 'Single map' : 'Compare MODIS vs VIIRS'}</button>
             <label><Layers3 size={15} /><span className="sr-only">Map satellite</span><select value={platform} onChange={event => { setPlatform(event.target.value); setAfter(0) }}>
               <option value="">Both sensors</option><option value="aqua">MODIS (all uploaded platforms)</option><option value="noaa20">VIIRS (all uploaded platforms)</option><option value="paired">Harmonized paired-day index</option>
             </select></label>
-            {mapMonth && <button className="small-button" onClick={() => { setMapMonth(''); setAfter(0) }}>{mapMonth} ×</button>}
+            {mapMonth && <span className="map-date">Map period: {mapMonth}</span>}
           </div>
-          <AtlasMap regions={regions} selected={chosen} points={hotspots.points} onRegion={chooseRegion} />
-          <div className="map-footer"><div className="key"><span><i /> MODIS</span><span><i /> VIIRS</span></div>
-            <div role="status">{mapError || (mapLoading ? 'Loading detections…' : hotspots.points.length ? format(hotspots.points.length) + (hotspots.aggregated ? ' displayed spatial grid cells' : ' plotted detections') : (hotspots.message || 'No detections to plot'))}</div>
+          {comparisonMode ? <div className="comparison-maps">
+            <div><strong>MODIS · uploaded platforms</strong><AtlasMap regions={regions} selected={chosen} points={comparisonPoints.modis.points} onRegion={chooseRegion} sync={synchronizedMaps} /></div>
+            <div><strong>VIIRS · uploaded platforms</strong><AtlasMap regions={regions} selected={chosen} points={comparisonPoints.viirs.points} onRegion={chooseRegion} sync={synchronizedMaps} /></div>
+          </div> : <AtlasMap regions={regions} selected={chosen} points={hotspots.points} onRegion={chooseRegion} />}
+          {comparisonMode && comparison && <div className="comparison-stats" role="status">
+            <span>MODIS raw detections <b>{format(comparison.sensors.MODIS?.detections)}</b></span>
+            <span>VIIRS raw detections <b>{format(comparison.sensors.VIIRS?.detections)}</b></span>
+            <span>Shared cell-days <b>{format(comparison.overlapping_cell_days)}</b></span>
+            <span>Observed dates <b>{format(comparison.sensors.MODIS?.observed_days)} / {format(comparison.sensors.VIIRS?.observed_days)}</b></span>
+          </div>}
+          <div className="map-footer"><div className="key"><span><i /> MODIS raw</span><span><i /> VIIRS raw</span><span><i /> Harmonized occupancy</span><span>Dot area reflects relative grid value; scale changes with zoom.</span></div>
+            <div role="status">{mapError || (mapLoading ? 'Loading detections…' : hotspots.points.length ? format(hotspots.points.length) + (hotspots.aggregated ? ' highest-value spatial grid cells shown' : ' plotted detections') : (hotspots.message || 'No detections to plot'))}</div>
             <div className="pages">{after > 0 && <button className="small-button" onClick={() => setAfter(0)}>First page</button>}{hotspots.next_after !== null && <button className="small-button" onClick={() => setAfter(hotspots.next_after!)}>Next page <ArrowRight size={13} /></button>}</div>
           </div>
         </div>
@@ -272,10 +307,19 @@ export default function App() {
       </section>
       <section id="methodology" className="frame block method">
         <div className="section-heading"><div><p className="eyebrow"><Satellite size={15} /> METHODOLOGY</p><h2>From detection to record</h2></div></div>
+        <article className="panel evidence"><h3>Harmonization evidence</h3>
+          <p>Selected region: {regions.find(item => item.id === region)?.name ?? region} · {record?.month ?? 'No observed month selected'}. Raw detections and calibrated occupied cell-days have different units.</p>
+          <div className="evidence-grid"><div><span>Raw MODIS detections</span><strong>{format(raw(record, 'MODIS'))}</strong></div>
+            <div><span>Raw VIIRS detections</span><strong>{format(raw(record, 'VIIRS'))}</strong></div>
+            <div><span>Paired-day activity index</span><strong>{format(record?.activity)}</strong></div></div>
+          <p>{record?.activity == null ? 'A comparable estimate is unavailable for this month.' : `${record.paired_days} matched observation days; NOAA-20 occupancy was multiplied by ${format(analysis?.calibration.factor)} before averaging with Aqua occupancy.`}</p>
+          <p>{analysis?.calibration.validation.held_out_months ? `${analysis.calibration.validation.held_out_months} leave-one-year-out months: median relative error ${format((analysis.calibration.validation.median_relative_error ?? 0) * 100)}% calibrated versus ${format((analysis.calibration.validation.uncalibrated_median_relative_error ?? 0) * 100)}% uncalibrated; 90th percentile ${format((analysis.calibration.validation.p90_relative_error ?? 0) * 100)}%.` : 'Held-out validation is unavailable for this region.'} This measures sensor agreement, not true fire detection accuracy.</p>
+          <a className="text-action" href="#record">Inspect the interactive monthly comparison <ArrowRight size={15} /></a>
+        </article>
         <div className="methods-grid">
           <article><h3>What satellites see</h3><p>FIRMS reports thermal anomalies observed during satellite overpasses. Clouds, smoke, revisit timing, and sensor resolution affect detection. A hotspot may be one of several observations of the same fire or a different heat source. Counts cannot measure unique fires or area burned.</p></article>
           <article><h3>How the index works</h3><p>EMBERA counts occupied equal-area cells per UTC day. It uses standard-product vegetation detections from Aqua and NOAA-20, with MODIS confidence ≥30 and nominal or high VIIRS confidence. It averages Aqua occupancy and calibrated NOAA-20 occupancy on paired observation days. Global figures pool the supplied country labels, which can overlap geographically.</p></article>
-          <article><h3>When comparisons are available</h3><p>Monthly matched-day estimates require at least 20 dates with both sensor records. Calibration needs 12 held-out months across seasons and stable improvement over uncalibrated comparisons. These estimates are NOT full-month fire totals: archive detections cannot establish complete satellite exposure or distinguish a missing swath from no fire.</p></article>
+          <article><h3>When comparisons are available</h3><p>Monthly matched-day estimates require at least 20 dates with both sensor records. Calibration needs 12 held-out months across seasons and stable improvement over uncalibrated comparisons. Seasonal anomaly scores use earlier years and a minimum spread of one occupied cell-day per paired day or 10% of baseline. These estimates are NOT full-month fire totals: archive detections cannot establish complete satellite exposure or distinguish a missing swath from no fire.</p></article>
         </div>
         <p className="calibration" role="status">Regional overlap · {analysis?.calibration.overlap_months ?? 0} qualifying months · {analysis?.calibration.factor == null ? 'NOAA-20 conversion unavailable' : `NOAA-20 × ${analysis.calibration.factor.toFixed(3)}`}</p>
         {analysis && analysis.calibration.validation.held_out_months > 0 && <p className="chart-caption">

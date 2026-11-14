@@ -1,4 +1,4 @@
-import { arc, interpolateRgb, scaleSqrt } from 'd3'
+import { arc } from 'd3'
 import { useId, useMemo, useRef } from 'react'
 import { Download } from 'lucide-react'
 import { format, monthNames, type Month } from './api'
@@ -27,12 +27,13 @@ function pattern(id: string) {
   </pattern></defs>
 }
 export function Colors({ max, metric }: { max: number; metric: string }) {
-  return <div className="legend"><i className="legend-zero" /><span>0</span>{max > 0 && <><i className="legend-ramp" /><span>{format(max)} {metric}</span></>}<i className="legend-missing" /><span>Unavailable</span></div>
+  return <div className="legend" aria-label={`${metric} scale from zero to ${format(max)}`}><i className="legend-zero" /><span>0</span>{[.25,.5,.75,1].map((fraction, i) => <span className="legend-step" key={fraction}><i style={{ background: HEAT[i] }} />{format(max * fraction)} {i === 3 ? metric : ''}</span>)}<i className="legend-missing" /><span>Missing</span><i className="legend-anomaly" /><span>Verified anomaly</span></div>
 }
+const HEAT = ['#71543b', '#b17836', '#df8640', '#f1b95c']
 export function heat(value: number | null, max: number) {
   if (value == null) return EMPTY
-  if (!value) return '#392621'
-  return interpolateRgb('#683323', '#ffd08a')(scaleSqrt().domain([0, Math.max(max, 1)]).clamp(true)(value))
+  if (value === 0) return '#392621'
+  return HEAT[Math.min(3, Math.floor(value / Math.max(max, 1) * 4))]
 }
 
 interface ChartProps {
@@ -104,7 +105,7 @@ export function Calendar({ years, byMonth, active, onSelect, metric, value, max,
             const amount = value(row)
             const label = `${month}: ${amount == null ? 'unavailable' : `${format(amount)} ${metric}`}`
             return <rect key={month} x={48 + i * 37} width="34" height="20" rx="2"
-              fill={amount == null ? `url(#${id})` : heat(amount, max)} stroke={month === active ? '#ffefd1' : 'none'}
+              fill={amount == null ? `url(#${id})` : heat(amount, max)} stroke={month === active ? '#ffefd1' : row?.anomaly ? '#ff5666' : 'none'} strokeWidth={row?.anomaly ? 2 : 1}
               role={row ? 'button' : undefined} tabIndex={row ? 0 : undefined} aria-label={label}
               aria-pressed={row ? month === active : undefined} className={row ? 'ring-segment' : undefined}
               onClick={() => row && onSelect(month)} onKeyDown={event => {

@@ -5,16 +5,16 @@ from backend.zip_api import analysis, coverage, regions
 def compute(db):
     locations = {r["id"]: r for r in regions(db)}
     candidates = db.execute("SELECT country, SUM(occupied) FROM daily GROUP BY country HAVING SUM(occupied)>=1000").fetchall()
+    equatorial_observations = {row[0] for row in db.execute(
+        "SELECT DISTINCT country FROM cells WHERE y BETWEEN 47 AND 66 AND occupied=1"
+    )}
     reports = []
     for country, _ in candidates:
         key = "country:" + country
         _, south, _, north = locations[key]["bounds"]
         if south > 10 or north < -10:
             continue
-        near_equator = db.execute(
-            "SELECT 1 FROM cells WHERE country=? AND y BETWEEN 47 AND 66 AND occupied=1 LIMIT 1", (country,)
-        ).fetchone()
-        if not near_equator:
+        if country not in equatorial_observations:
             continue
         span = coverage(db, key)
         report = analysis(db, key, date.fromisoformat(span["start"]), date.fromisoformat(span["end"]))

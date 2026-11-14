@@ -1,0 +1,5 @@
+- Continue from branch `main` at base commit `66fa924`; current changes are uncommitted.
+- The `clearRect` runtime error was reproduced and fixed; eight rapid map-mode toggles produced no browser errors in a fresh tab.
+- Assess cold-start global map latency. The first observed 2025-12 request took 17.79 seconds; a later warm direct query took 0.11 seconds, and repeat API requests now use a bounded cache.
+- Review the 17 retrospective statistical alerts with independent fire context before operational use. They are not wildfire predictions.
+- Run `npx.cmd tsc --noEmit`, `.\.venv\Scripts\python.exe -m pytest -q --basetemp=.pytest_tmp`, and `npm.cmd run build` before committing. Keep FastAPI on port 8000 and Next.js on 5173 for browser checks.

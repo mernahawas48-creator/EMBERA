@@ -1,0 +1,4 @@
+latitude,longitude,acq_date,acq_time,satellite,instrument,confidence
+39,-121,2020-07-01,50,Terra,MODIS,80
+39.01,-120.99,2020-07-01,0051,T,MODIS,80
+39,-121,2020-07-01,0050,T,MODIS,90
