@@ -1,6 +1,6 @@
 'use client'
 import { useEffect, useState } from 'react'
-import { Activity, ArrowLeft, Flame, Radio, ShieldAlert, ClipboardCheck, ChevronDown } from 'lucide-react'
+import { Activity, ArrowLeft, Flame, Radio, ShieldAlert } from 'lucide-react'
 import { api, format, type Region } from './api'
 
 type Entry = Region & { assessed: number; flagged: number; series: {
@@ -18,8 +18,6 @@ type Intelligence = {
   historical?: { country: string; month: string; activity: number; baseline: number; score: number; anomaly: boolean; paired_days: number; calibration: unknown }[]
   alerts: unknown[]
 }
-type RecentAlert = { sensor: string; region: string; period: [string,string]; latitude: number; longitude: number; cell_count: number; activity: number; baseline: number; score: number; severity: 'HIGH'|'MEDIUM'|'LOW'; explanation: string; recommendation: string; uncertainty: string }
-type RecentAlertResponse = { period: [string,string] | null; alerts: RecentAlert[]; watch: RecentAlert[]; status: string; method?: string }
 
 export default function Equatorial() {
   const [results, setResults] = useState<{ countries: Entry[]; evaluated_months: number; flagged_months: number }>()
@@ -27,8 +25,6 @@ export default function Equatorial() {
   const [error, setError] = useState('')
   const [intelligence, setIntelligence] = useState<Intelligence | null>(null)
   const [intelligenceError, setIntelligenceError] = useState('')
-  const [alertSort, setAlertSort] = useState('score')
-  const [recentAlerts, setRecentAlerts] = useState<RecentAlertResponse | null>(null)
   const [bioHeight, setBioHeight] = useState(1800)
   useEffect(() => {
     const controller = new AbortController()
@@ -38,8 +34,6 @@ export default function Equatorial() {
     }).catch(err => { if (!controller.signal.aborted) setError(err.message) })
     api<Intelligence>('/intelligence', controller.signal).then(setIntelligence)
       .catch(() => { if (!controller.signal.aborted) setIntelligenceError('unavailable') })
-    api<RecentAlertResponse>('/recent-alerts', controller.signal).then(setRecentAlerts)
-      .catch(() => { if (!controller.signal.aborted) setRecentAlerts({period:null,alerts:[],watch:[],status:'unavailable'}) })
     return () => controller.abort()
   }, [])
   const ranked = (results?.countries ?? []).map(region => ({
@@ -47,7 +41,6 @@ export default function Equatorial() {
   })).sort((a, b) => Math.abs(b.peak?.robust_z ?? 0) - Math.abs(a.peak?.robust_z ?? 0))
   const selected = results?.countries.find(country => country.id === id)
   const summaries = Object.entries(intelligence?.recent_summary ?? {})
-  const alertRows = [...(recentAlerts?.alerts ?? [])].sort((a, b) => alertSort === 'date' ? b.period[1].localeCompare(a.period[1]) : b.score - a.score)
   const monthRows = selected?.series.filter(row => row.evaluated_activity != null) ?? []
   const chartMax = Math.max(1, ...monthRows.flatMap(row => [row.evaluated_activity ?? 0, row.baseline ?? 0]))
   return <main className="frame block method">
@@ -76,12 +69,7 @@ export default function Equatorial() {
     {!results && !error && <p className="status" role="status">Evaluating historical holdouts…</p>}
     {results && <><p className="calibration">{results.evaluated_months} held-out country-months scored · {results.flagged_months} flagged at |z| ≥ 3.5</p>
       <a className="small-button" href="/api/exports/equatorial.csv">Download holdout scores</a>
-      {intelligence && <div className="kpi-grid stats-cards"><div className="kpi"><Activity/><strong>{results.evaluated_months.toLocaleString()}</strong><span>Historical country-months scored</span></div><div className="kpi"><ShieldAlert/><strong>{results.flagged_months.toLocaleString()}</strong><span>Historical seasonal signals</span></div><div className="kpi"><Radio/><strong>{summaries.reduce((sum,[,n])=>sum+n,0).toLocaleString()}</strong><span>Recent raw detections</span></div><div className="kpi"><Flame/><strong>{intelligence.model ? 'Historical ML + baseline' : 'Historical baseline'}</strong><span>Recent alerts use seasonal statistics</span></div></div>}
-      <article className="panel anomalies" style={{ marginTop: 15 }}><div className="dashboard-toolbar"><div><p className="eyebrow"><ShieldAlert size={15}/> CURRENT WEEK · STATISTICAL WATCH</p><h3>Recent activity alerts</h3><p>{recentAlerts?.period ? `${recentAlerts.period[0]} – ${recentAlerts.period[1]} · latest incomplete day excluded` : 'Comparing current observations with historical seasonal detections'}</p></div><label>Sort<select value={alertSort} onChange={e => setAlertSort(e.target.value)}><option value="score">Largest deviation</option><option value="date">Most recent</option></select></label></div>
-        {alertRows.length ? <ul className="alert-cards">{alertRows.map((alert, index) => <li key={`${alert.sensor}-${alert.latitude}-${alert.longitude}-${index}`} className={`alert-card severity-${alert.severity.toLowerCase()}`}><div className="alert-card-head"><span className="severity-pill"><ShieldAlert size={14}/>{alert.severity}</span><time>{alert.period[0]} – {alert.period[1]}</time><span className="sensor-tag">{alert.sensor}</span></div><h4>{alert.region} · around {alert.latitude.toFixed(2)}°, {alert.longitude.toFixed(2)}°</h4><div className="alert-metrics"><span><small>Recent cell-days</small><strong>{format(alert.activity)}</strong></span><span><small>Seasonal typical</small><strong>{format(alert.baseline)}</strong></span><span><small>Deviation score</small><strong>{format(alert.score)}</strong></span></div><p>{alert.explanation}</p><details><summary><ChevronDown size={14}/> How this was assessed</summary><p>{alert.uncertainty} Seasonal baseline includes {alert.cell_count} nearby cell(s); at least 3 historical detection years.</p></details></li>)}</ul> : <div className="no-alerts"><ShieldAlert/><div><h4>{recentAlerts?.status === 'no_statistically_significant_anomalies' ? 'No statistically significant anomalies detected' : 'No current alerts meet the comparison criteria'}</h4><p>Recent detections are still shown in the dashboard totals. Cells without enough historical observations are left unscored.</p></div></div>}
-      </article>
-      <article className="panel recommendations-panel"><p className="eyebrow"><ClipboardCheck size={15}/> RECOMMENDATIONS</p><h3>Practical next steps</h3>{recentAlerts?.alerts.length ? <div className="recommendation-grid">{recentAlerts.alerts.slice(0,6).map((alert,i)=><div key={`${alert.sensor}-${alert.latitude}-${i}`}><strong>{alert.severity} · {alert.sensor} · {alert.latitude.toFixed(1)}°, {alert.longitude.toFixed(1)}°</strong><p>{alert.recommendation}</p></div>)}</div> : <div className="recommendation-grid"><div><strong>Keep monitoring</strong><p>Review detections after the next available satellite pass; only cells with enough historical observations are assessed.</p></div><div><strong>Verify before escalation</strong><p>Check repeated detections with local environmental monitoring sources. A satellite hotspot alone does not confirm a wildfire.</p></div></div>}</article>
-      {!!recentAlerts?.watch?.length && <article className="panel watch-panel"><p className="eyebrow">ELEVATED ACTIVITY · WATCH</p><p>{recentAlerts.watch.length} locations show elevated activity below the statistical alert threshold. Continue monitoring; these are not counted as significant anomalies.</p><div className="watch-list">{recentAlerts.watch.slice(0,8).map((item,i)=><span key={i}>{item.sensor} · {item.latitude.toFixed(1)}°, {item.longitude.toFixed(1)}° · score {format(item.score)}</span>)}</div></article>}
+      {intelligence && <div className="kpi-grid stats-cards"><div className="kpi"><Activity/><strong>{results.evaluated_months.toLocaleString()}</strong><span>Historical country-months scored</span></div><div className="kpi"><ShieldAlert/><strong>{results.flagged_months.toLocaleString()}</strong><span>Historical seasonal signals</span></div><div className="kpi"><Radio/><strong>{summaries.reduce((sum,[,n])=>sum+n,0).toLocaleString()}</strong><span>Recent raw detections</span></div><div className="kpi"><Flame/><strong>{intelligence.model ? 'Historical ML + baseline' : 'Historical baseline'}</strong><span>Historical analysis only</span></div></div>}
       <div className="insight-grid" style={{ marginTop: 15 }}>
         <article className="panel anomalies"><h3>Explore historical regions</h3><label className="country-picker">Country or region<select value={id} onChange={e=>setId(e.target.value)}>{results.countries.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></label><p>Historical anomaly month counts are available in the baseline comparison.</p>
           {ranked.slice(0,6).map(({region,peak})=><button className="country-chip" key={region.id} onClick={()=>setId(region.id)}>{region.name}<span>{peak?.month ?? 'No flagged month'}</span></button>)}

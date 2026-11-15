@@ -37,6 +37,18 @@
 - Embedded `public/bioscape.html` at the bottom of the Equatorial page in an iframe and added EMBERA dark-theme overrides to its CSS while preserving all supplied sections, script, plot data, and interactions. App navigation retains direct access.
 - Verification: TypeScript passes; direct recent-alert pipeline completes in ~3 seconds and returns 22 alerts / 25 watch events. `backend/api.py` syntax parses. Production build still has prior Turbopack worker-start failure; browser rendering not yet checked.
 
+## Equatorial error fix
+
+- Screenshot error was a backend `NameError`: `equatorial()` called `equatorial_report` after its import had been removed. Restored `from backend.equatorial import cached as equatorial_report`.
+- Added a persistent report cache in `backend/equatorial.py`, keyed to the archive database version, so cold process restarts reuse the 21-country / 479-month calculation. Cache saved at ignored `data/processed/equatorial_report.json`.
+- Verified direct endpoint function response: HTTP handler function returns 21 countries, 479 evaluated months, and 17 historical flags in 0.019s. TypeScript check passes. FastAPI TestClient wrapper did not return within the 15-second check window, so no HTTP integration result claimed.
+
+## Recent alert harmonization correction
+
+- Removed the sensor-by-sensor NRT alert/watch calculations and their recommendation cards. The uploaded NRT data lack the vegetation-fire type required by historical qualification and transfer of standard-product calibration is not validated.
+- `/api/recent-alerts` now explicitly returns no recent alerts/watch items with an explanatory status/reason; Equatorial UI displays one concise note and retains the historical analysis panel only.
+- TypeScript passes; `recent_alerts()` returns an empty alert/watch set with `harmonized_nrt_inference_unvalidated` status.
+
 ## Resume commands
 
 ```powershell

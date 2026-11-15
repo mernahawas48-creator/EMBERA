@@ -1,5 +1,9 @@
 from datetime import date
+import json
+from pathlib import Path
 from backend.zip_api import analysis, coverage, regions
+
+CACHE_FILE = Path(__file__).resolve().parents[1] / "data" / "processed" / "equatorial_report.json"
 
 
 def compute(db):
@@ -41,6 +45,20 @@ _cache = None
 
 def cached_for(db, version):
     global _cache
-    if _cache is None or _cache[0] != version:
-        _cache = (version, compute(db))
+    if _cache is not None and _cache[0] == version:
+        return _cache[1]
+    if CACHE_FILE.is_file():
+        try:
+            saved = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+            if tuple(saved["version"]) == version:
+                _cache = (version, saved["report"])
+                return _cache[1]
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    report = compute(db)
+    _cache = (version, report)
+    CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temp = CACHE_FILE.with_suffix(".json.part")
+    temp.write_text(json.dumps({"version": version, "report": report}, separators=(",", ":")), encoding="utf-8")
+    temp.replace(CACHE_FILE)
     return _cache[1]
